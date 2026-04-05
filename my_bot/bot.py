@@ -11,19 +11,16 @@ from telegram.ext import (
 )
 from config import BOT_TOKEN, TASKS, FAQ
 
-# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Индекс текущего задания для каждого пользователя
 user_task_index: dict[int, int] = {}
 
 
 def get_main_keyboard():
-    """Главная клавиатура с кнопкой Готово."""
     keyboard = [
         [InlineKeyboardButton("✅ Готово — следующее задание", callback_data="next_task")],
         [InlineKeyboardButton("🔄 Начать сначала", callback_data="restart")],
@@ -32,7 +29,6 @@ def get_main_keyboard():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start."""
     user = update.effective_user
     user_id = user.id
     user_task_index[user_id] = 0
@@ -44,7 +40,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Также можешь задать мне вопрос — я отвечу, если знаю ответ 🤓\n\n"
         "Напиши /help чтобы увидеть список доступных команд.",
         parse_mode="Markdown",
-        reply_markup=get_main_keyboard(),
     )
     await send_task(update, context, user_id, from_start=True)
 
@@ -55,37 +50,52 @@ async def send_task(
     user_id: int,
     from_start: bool = False,
 ):
-    """Отправляет текущее задание пользователю."""
     index = user_task_index.get(user_id, 0)
 
+    # Определяем куда отправлять
+    if from_start:
+        chat = update.message
+    else:
+        chat = update.callback_query.message
+
     if index >= len(TASKS):
-        text = (
+        await chat.reply_text(
             "🎉 *Поздравляю! Ты выполнил все задания!*\n\n"
-            "Нажми «Начать сначала», чтобы пройти снова."
+            "Нажми «Начать сначала», чтобы пройти снова.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(),
         )
-        msg = update.message if from_start else update.callback_query.message
-        await msg.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
         return
 
     task = TASKS[index]
-    text = (
+    caption = (
         f"📌 *Задание {index + 1} из {len(TASKS)}*\n\n"
         f"{task['title']}\n\n"
         f"{task['description']}"
     )
+    image_url = task.get("image")
 
-    if from_start:
-        await update.message.reply_text(
-            text, parse_mode="Markdown", reply_markup=get_main_keyboard()
-        )
-    else:
-        await update.callback_query.message.reply_text(
-            text, parse_mode="Markdown", reply_markup=get_main_keyboard()
-        )
+    if image_url:
+        try:
+            await chat.reply_photo(
+                photo=image_url,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить картинку: {e}")
+
+    # Если картинки нет или она не загрузилась — отправляем текст
+    await chat.reply_text(
+        caption,
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(),
+    )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на inline-кнопки."""
     query = update.callback_query
     await query.answer()
 
@@ -105,7 +115,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help."""
     questions_list = "\n".join(f"• {q}" for q in FAQ.keys())
     await update.message.reply_text(
         "📖 *Доступные команды:*\n"
@@ -121,7 +130,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def current_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /task — показать текущее задание."""
     user_id = update.effective_user.id
     if user_id not in user_task_index:
         await update.message.reply_text("Сначала запусти бота командой /start.")
@@ -130,10 +138,8 @@ async def current_task_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений — ищет ответ в FAQ."""
     user_text = update.message.text.lower().strip()
 
-    # Поиск по ключевым словам в FAQ
     best_match = None
     best_score = 0
 
@@ -163,7 +169,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    """Запуск бота."""
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
