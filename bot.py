@@ -1,198 +1,243 @@
 import logging
 import random
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes,
 )
-from config import BOT_TOKEN, TASKS, FAQ, WELCOME_MESSAGE, FINAL_MESSAGE, PRIZE_HINT
+from config import BOT_TOKEN, TASKS, FAQ
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Состояние пользователей: {user_id: {"task": 0, "hint_index": 0, "solved": False}}
+# state per user: {user_id: {"task": int, "waiting_answer": bool, "hints_used": int}}
 user_state: dict[int, dict] = {}
 
 
-def get_state(user_id: int) -> dict:
-    if user_id not in user_state:
-        user_state[user_id] = {"task": 0, "hint_index": 0}
-    return user_state[user_id]
+def get_keyboard(waiting_answer: bool, hints_used: int, max_hints: int):
+    task = user_state
+    if waiting_answer:
+        buttons = []
+        if hints_used < max_hints:
+            buttons.append([InlineKeyboardButton(f"💡 Подсказка ({hints_used}/{max_hints})", callback_data="hint")])
+        buttons.append([InlineKeyboardButton("✏️ Ввести ответ", callback_data="enter_answer")])
+        return InlineKeyboardMarkup(buttons)
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➡️ Следующее задание", callback_data="next_task")]
+        ])
 
 
-def get_done_keyboard():
+def get_start_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Готово — следующая загадка", callback_data="next")],
+        [InlineKeyboardButton("🗺 Начать квест!", callback_data="start_quest")]
     ])
-
-
-def get_hint_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💡 Подсказка", callback_data="hint")],
-    ])
-
-
-async def send_task(chat_id: int, context, user_id: int):
-    state = get_state(user_id)
-    idx = state["task"]
-    state["hint_index"] = 0  # сброс подсказок для нового задания
-
-    if idx >= len(TASKS):
-        # Финал
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=FINAL_MESSAGE.format(hint=PRIZE_HINT),
-            parse_mode="Markdown"
-        )
-        return
-
-    task = TASKS[idx]
-
-    # Отправляем картинку
-    try:
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=task["image_url"],
-            caption=f"📍 *{task['title']}*",
-            parse_mode="Markdown"
-        )
-    except Exception:
-        pass  # если картинка не загрузилась — продолжаем без неё
-
-    # Отправляем текст загадки
-    text = (
-        f"*{task['title']}*\n\n"
-        f"{task['description']}\n\n"
-        f"_Напиши ответ прямо в чат. Если не знаешь — нажми «Подсказка»._"
-    )
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="Markdown",
-        reply_markup=get_hint_keyboard()
-    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_state[user_id] = {"task": 0, "hint_index": 0}
+    user_state[user_id] = {"task": -1, "waiting_answer": False, "hints_used": 0}
 
-    await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
-    await send_task(update.effective_chat.id, context, user_id)
+    await update.message.reply_text(
+        TASKS["intro"],
+        parse_mode="Markdown",
+        reply_markup=get_start_keyboard()
+    )
+
+
+async def send_task(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, from_callback=True):
+    state = user_state[user_id]
+    idx = state["task"]
+    tasks = TASKS["quests"]
+
+    if idx >= len(tasks):
+        await send_finale(update, context, from_callback)
+        return
+
+    task = tasks[idx]
+    state["waiting_answer"] = True
+    state["hints_used"] = 0
+    max_hints = len(task.get("hints", []))
+
+    text = (
+        f"📍 *Задание {idx + 1} из {len(tasks)}*\n\n"
+        f"{task['emoji']}  *{task['title']}*\n\n"
+        f"{task['riddle']}\n\n"
+        f"_{task['instruction']}_"
+    )
+
+    kb = get_keyboard(True, 0, max_hints)
+
+    if from_callback:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        if task.get("image_url"):
+            await update.callback_query.message.reply_photo(
+                photo=task["image_url"],
+                caption=f"📸 {task.get('image_caption', '')}"
+            )
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        if task.get("image_url"):
+            await update.message.reply_photo(
+                photo=task["image_url"],
+                caption=f"📸 {task.get('image_caption', '')}"
+            )
+
+
+async def send_finale(update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback=True):
+    text = TASKS["finale"]
+    if from_callback:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+        if TASKS.get("finale_image"):
+            await update.callback_query.message.reply_photo(
+                photo=TASKS["finale_image"],
+                caption="🎁 Твой приз ждёт тебя!"
+            )
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    state = get_state(user_id)
 
-    if query.data == "hint":
-        idx = state["task"]
-        if idx >= len(TASKS):
-            return
-        task = TASKS[idx]
-        hints = task["hints"]
-        hint_idx = state["hint_index"]
+    if user_id not in user_state:
+        user_state[user_id] = {"task": -1, "waiting_answer": False, "hints_used": 0}
 
-        if hint_idx < len(hints):
-            await query.message.reply_text(hints[hint_idx], parse_mode="Markdown")
-            state["hint_index"] += 1
-        else:
-            await query.message.reply_text(
-                "🤷 Подсказки закончились! Попробуй ещё раз или спроси кого-нибудь рядом 😄",
-            )
+    state = user_state[user_id]
 
-    elif query.data == "next":
+    if query.data == "start_quest":
+        state["task"] = 0
+        await send_task(update, context, user_id)
+
+    elif query.data == "next_task":
         state["task"] += 1
-        state["hint_index"] = 0
-        await send_task(query.message.chat_id, context, user_id)
+        await send_task(update, context, user_id)
+
+    elif query.data == "hint":
+        idx = state["task"]
+        tasks = TASKS["quests"]
+        if idx >= len(tasks):
+            return
+        task = tasks[idx]
+        hints = task.get("hints", [])
+        used = state["hints_used"]
+        if used < len(hints):
+            hint_text = f"💡 *Подсказка {used + 1}:*\n\n{hints[used]}"
+            state["hints_used"] += 1
+            max_hints = len(hints)
+            kb = get_keyboard(True, state["hints_used"], max_hints)
+            await query.message.reply_text(hint_text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await query.message.reply_text("Подсказки закончились! Ты справишься 💪")
+
+    elif query.data == "enter_answer":
+        context.user_data["awaiting_answer"] = True
+        await query.message.reply_text(
+            "✏️ Напиши свой ответ — я проверю!",
+            parse_mode="Markdown"
+        )
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    state = get_state(user_id)
     text = update.message.text.lower().strip()
-    idx = state["task"]
 
-    # Если квест завершён
-    if idx >= len(TASKS):
-        await update.message.reply_text(
-            "🎉 Ты уже прошла весь квест! Напиши /start чтобы начать заново."
-        )
+    if user_id not in user_state:
+        await update.message.reply_text("Напиши /start чтобы начать квест 🗺")
         return
 
-    # Команда подсказка
-    if "подсказка" in text or "hint" in text or "помощь" in text:
-        task = TASKS[idx]
-        hints = task["hints"]
-        hint_idx = state["hint_index"]
-        if hint_idx < len(hints):
-            await update.message.reply_text(hints[hint_idx], parse_mode="Markdown")
-            state["hint_index"] += 1
-        else:
-            await update.message.reply_text("🤷 Все подсказки уже выданы! Ты справишься 💪")
+    state = user_state[user_id]
+
+    # Check if waiting for answer
+    if context.user_data.get("awaiting_answer") and state.get("waiting_answer"):
+        idx = state["task"]
+        tasks = TASKS["quests"]
+        if idx < len(tasks):
+            task = tasks[idx]
+            correct_answers = [a.lower().strip() for a in task.get("answers", [])]
+            # Fuzzy: check if any keyword from correct answers is in user text
+            matched = any(
+                any(kw in text for kw in ans.split())
+                for ans in correct_answers
+            )
+            if matched:
+                context.user_data["awaiting_answer"] = False
+                state["waiting_answer"] = False
+                praise = random.choice([
+                    "🎉 Верно! Отлично справилась!",
+                    "✅ Правильно! Ты умница!",
+                    "🌟 Именно! Браво!",
+                    "💫 В точку! Молодец!"
+                ])
+                max_hints = len(task.get("hints", []))
+                kb = get_keyboard(False, 0, max_hints)
+                await update.message.reply_text(
+                    f"{praise}\n\n{task.get('correct_text', '')}",
+                    parse_mode="Markdown",
+                    reply_markup=kb
+                )
+            else:
+                await update.message.reply_text(
+                    random.choice([
+                        "🤔 Не совсем... Попробуй ещё раз или возьми подсказку!",
+                        "❌ Пока не то. Может подсказка поможет? 💡",
+                        "🔍 Почти! Но нет. Осмотрись внимательнее!"
+                    ]),
+                    reply_markup=get_keyboard(True, state["hints_used"], len(task.get("hints", [])))
+                )
         return
 
-    # Проверка FAQ
+    # FAQ search
+    best_match = None
+    best_score = 0
     for question, answer in FAQ.items():
         keywords = question.lower().split()
-        if any(kw in text for kw in keywords):
-            await update.message.reply_text(f"🤖 {answer}", parse_mode="Markdown")
-            return
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_match = answer
 
-    # Проверка ответа на текущую загадку
-    task = TASKS[idx]
-    correct_answers = [a.lower() for a in task["answers"]]
-    is_correct = any(ans in text for ans in correct_answers)
-
-    if is_correct:
-        await update.message.reply_text(
-            task["success_text"],
-            parse_mode="Markdown",
-            reply_markup=get_done_keyboard()
-        )
+    if best_score >= 1 and best_match:
+        await update.message.reply_text(f"🤖 {best_match}", parse_mode="Markdown")
     else:
-        wrong_phrases = [
-            "Хм, не то... попробуй ещё раз! 🤔 Или нажми «Подсказка».",
-            "Близко, но нет 😄 Подумай ещё!",
-            "Не совсем... Напиши *подсказка* если нужна помощь 💡",
-            "Продолжай искать — ты на верном пути! 🗺",
-        ]
         await update.message.reply_text(
-            random.choice(wrong_phrases),
-            parse_mode="Markdown",
-            reply_markup=get_hint_keyboard()
+            "Не поняла вопрос 🤔 Напиши /help или просто продолжай квест!"
         )
-
-
-async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_state:
-        await update.message.reply_text("Сначала запусти квест командой /start 🗺")
-        return
-    await send_task(update.effective_chat.id, context, user_id)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Команды:*\n"
-        "/start — начать квест\n"
-        "/task — показать текущую загадку\n"
+        "/start — начать квест заново\n"
+        "/task — повторить текущее задание\n"
         "/help — эта справка\n\n"
-        "💡 Чтобы получить подсказку — напиши слово *подсказка* в любой момент.",
+        "Во время квеста:\n"
+        "• Нажми *«💡 Подсказка»* если застряла\n"
+        "• Нажми *«✏️ Ввести ответ»* чтобы проверить\n"
+        "• Нажми *«➡️ Следующее»* после верного ответа",
         parse_mode="Markdown"
     )
+
+
+async def current_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_state or user_state[user_id]["task"] < 0:
+        await update.message.reply_text("Сначала запусти квест командой /start 🗺")
+        return
+    await send_task(update, context, user_id, from_callback=False)
 
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("task", task_command))
+    app.add_handler(CommandHandler("task", current_task_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    logger.info("Квест-бот запущен! 🗺")
+    logger.info("Квест-бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
