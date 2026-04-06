@@ -3,7 +3,7 @@ import os
 # ─────────────────────────────────────────────
 #  ТОКЕН БОТА
 # ─────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8283202170:AAHMbX5Swn8U9vTfUJWjGAB5PUJyYj4nA3M")
 
 # ─────────────────────────────────────────────
 #  ВСТУПИТЕЛЬНОЕ СООБЩЕНИЕ
