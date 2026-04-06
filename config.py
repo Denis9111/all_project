@@ -4,7 +4,7 @@ import os
 #  НАСТРОЙКИ БОТА
 # ─────────────────────────────────────────────
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8283202170:AAHMbX5Swn8U9vTfUJWjGAB5PUJyYj4nA3M")
 
 
 # ─────────────────────────────────────────────
@@ -20,7 +20,7 @@ TASKS = [
             "Сделай 10 медленных круговых движений головой — 5 по часовой стрелке, 5 против.\n"
             "Потяни шею влево и вправо, задержись на 10 секунд с каждой стороны."
         ),
-        "image": "https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?w=800&q=80",
+        "image": "/Users/m1pro/Downloads/1111.webp",
     },
     {
         "title": "💪 Задание 2: Отжимания",
