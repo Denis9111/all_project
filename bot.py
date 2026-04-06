@@ -22,7 +22,7 @@ user_task_index: dict[int, int] = {}
 
 def get_main_keyboard():
     keyboard = [
-        [InlineKeyboardButton("✅ Гот  следующее задание", callback_data="next_task")],
+        [InlineKeyboardButton("✅ Гот  следующ задание", callback_data="next_task")],
         [InlineKeyboardButton("🔄 Начать сначала", callback_data="restart")],
     ]
     return InlineKeyboardMarkup(keyboard)
