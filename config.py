@@ -180,7 +180,7 @@ TASKS = [
             "с кодовым словом чтобы получить заветный клад 🎁\n\n"
             "Напиши кодовое слово, спрятанное в конверте."
         ),
-        "image_file": "mege6.jpg",  # images/zadanie7.jpg
+        "image_file": "imege6.jpg",  # images/zadanie7.jpg
         "place_image_file": "place7.png",   # ← фото места (новое)
         "answers": ["garmin"],
         "hints": [

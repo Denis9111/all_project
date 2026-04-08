@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-IMAGES_DIR = Path("/Users/m1pro/IT/datagrip/all_project/images")
+IMAGES_DIR = Path(__file__).parent / "images"
 
 # {user_id: {"task": int, "waiting_answer": bool, "waiting_photo": bool, "hints_used": int}}
 user_state: dict[int, dict] = {}
