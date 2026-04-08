@@ -1,102 +1,161 @@
 import logging
 import random
-import os
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes,
 )
-from config import BOT_TOKEN, TASKS, FAQ
+from config import BOT_TOKEN, TASKS, FAQ, WELCOME_MESSAGE, FINAL_MESSAGE, PRIZE_HINT
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# state per user: {user_id: {"task": int, "waiting_answer": bool, "hints_used": int}}
+IMAGES_DIR = Path("/Users/m1pro/IT/datagrip/all_project/images")
+
+# {user_id: {"task": int, "waiting_answer": bool, "waiting_photo": bool, "hints_used": int}}
 user_state: dict[int, dict] = {}
 
 
-def get_keyboard(waiting_answer: bool, hints_used: int, max_hints: int):
-    task = user_state
-    if waiting_answer:
-        buttons = []
-        if hints_used < max_hints:
-            buttons.append([InlineKeyboardButton(f"💡 Подсказка ({hints_used}/{max_hints})", callback_data="hint")])
-        buttons.append([InlineKeyboardButton("✏️ Ввести ответ", callback_data="enter_answer")])
-        return InlineKeyboardMarkup(buttons)
+# ──────────────────────────────────────────────
+#  КЛАВИАТУРЫ
+# ──────────────────────────────────────────────
+
+def kb_waiting(hints_used: int, max_hints: int) -> InlineKeyboardMarkup:
+    buttons = []
+    if hints_used < max_hints:
+        buttons.append([InlineKeyboardButton(
+            f"💡 Подсказка ({hints_used + 1}/{max_hints})",
+            callback_data="hint"
+        )])
+    buttons.append([InlineKeyboardButton("✏️ Ввести ответ", callback_data="enter_answer")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def kb_show_place() -> InlineKeyboardMarkup:
+    """Кнопки после верного ответа — показать место или нет."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👀 Да, покажи место!", callback_data="show_place")],
+        [InlineKeyboardButton("💪 Нет, я справлюсь сама", callback_data="no_show_place")],
+    ])
+
+
+def kb_photo_prompt(is_last_task: bool) -> InlineKeyboardMarkup:
+    """Кнопка после фото — следующая загадка или финал."""
+    if is_last_task:
+        label = "📸 Сделала фото? Жми — За призом! 🎁"
+        data = "photo_done_finale"
     else:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ Следующее задание", callback_data="next_task")]
-        ])
+        label = "📸 Сделала фото? Жми — Следующая загадка! ➡️"
+        data = "photo_done"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)]])
 
 
-def get_start_keyboard():
+def kb_start() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🗺 Начать квест!", callback_data="start_quest")]
     ])
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_state[user_id] = {"task": -1, "waiting_answer": False, "hints_used": 0}
+# ──────────────────────────────────────────────
+#  ОТПРАВКА ЗАДАНИЯ
+# ──────────────────────────────────────────────
 
-    await update.message.reply_text(
-        TASKS["intro"],
-        parse_mode="Markdown",
-        reply_markup=get_start_keyboard()
-    )
-
-
-async def send_task(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, from_callback=True):
+async def send_task(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                    user_id: int, from_callback: bool = True):
     state = user_state[user_id]
     idx = state["task"]
-    tasks = TASKS["quests"]
 
-    if idx >= len(tasks):
+    if idx >= len(TASKS):
         await send_finale(update, context, from_callback)
         return
 
-    task = tasks[idx]
+    task = TASKS[idx]
     state["waiting_answer"] = True
+    state["waiting_photo"] = False
     state["hints_used"] = 0
     max_hints = len(task.get("hints", []))
 
     text = (
-        f"📍 *Задание {idx + 1} из {len(tasks)}*\n\n"
-        f"{task['emoji']}  *{task['title']}*\n\n"
-        f"{task['riddle']}\n\n"
-        f"_{task['instruction']}_"
+        f"📍 Задание {idx + 1} из {len(TASKS)}\n\n"
+        f"{task['title']}\n\n"
+        f"{task['description']}"
     )
 
-    kb = get_keyboard(True, 0, max_hints)
+    kb = kb_waiting(0, max_hints)
+    chat = update.callback_query.message if from_callback else update.message
 
-    if from_callback:
-        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-        if task.get("image_url"):
-            await update.callback_query.message.reply_photo(
-                photo=task["image_url"],
-                caption=f"📸 {task.get('image_caption', '')}"
-            )
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-        if task.get("image_url"):
-            await update.message.reply_photo(
-                photo=task["image_url"],
-                caption=f"📸 {task.get('image_caption', '')}"
-            )
+    # 1. Картинка загадки
+    image_file = task.get("image_file")
+    if image_file:
+        image_path = IMAGES_DIR / image_file
+        if image_path.exists():
+            with open(image_path, "rb") as f:
+                await chat.reply_photo(photo=f)
+        else:
+            logger.warning(f"Картинка не найдена: {image_path}")
+
+    # 2. Текст загадки с кнопками
+    await chat.reply_text(text, reply_markup=kb)
 
 
-async def send_finale(update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback=True):
-    text = TASKS["finale"]
-    if from_callback:
-        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
-        if TASKS.get("finale_image"):
-            await update.callback_query.message.reply_photo(
-                photo=TASKS["finale_image"],
-                caption="🎁 Твой приз ждёт тебя!"
-            )
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown")
+async def send_finale(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                      from_callback: bool = True):
+    text = FINAL_MESSAGE.format(hint=PRIZE_HINT)
+    chat = update.callback_query.message if from_callback else update.message
 
+    finale_image = IMAGES_DIR / "finale.jpg"
+    if finale_image.exists():
+        with open(finale_image, "rb") as f:
+            await chat.reply_photo(photo=f)
+
+    await chat.reply_text(text)
+
+
+# ──────────────────────────────────────────────
+#  КОМАНДЫ
+# ──────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_state[user_id] = {
+        "task": -1,
+        "waiting_answer": False,
+        "waiting_photo": False,
+        "hints_used": 0
+    }
+    context.user_data.clear()
+    await update.message.reply_text(WELCOME_MESSAGE, reply_markup=kb_start())
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Команды:\n"
+        "/start — начать квест заново\n"
+        "/task — повторить текущую загадку\n"
+        "/help — эта справка\n\n"
+        "Во время квеста:\n"
+        "• Нажми Подсказка если застряла\n"
+        "• Нажми Ввести ответ чтобы проверить\n"
+        "• После верного ответа — пришли фото с места\n"
+        "• Или напиши слово подсказка 💡"
+    )
+
+
+async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_state or user_state[user_id]["task"] < 0:
+        await update.message.reply_text("Сначала запусти квест командой /start 🗺")
+        return
+    await send_task(update, context, user_id, from_callback=False)
+
+
+# ──────────────────────────────────────────────
+#  КНОПКИ
+# ──────────────────────────────────────────────
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -104,42 +163,139 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if user_id not in user_state:
-        user_state[user_id] = {"task": -1, "waiting_answer": False, "hints_used": 0}
+        user_state[user_id] = {
+            "task": -1,
+            "waiting_answer": False,
+            "waiting_photo": False,
+            "hints_used": 0
+        }
 
     state = user_state[user_id]
 
     if query.data == "start_quest":
         state["task"] = 0
-        await send_task(update, context, user_id)
+        await send_task(update, context, user_id, from_callback=True)
 
-    elif query.data == "next_task":
+    elif query.data == "show_place":
+        # Показываем фото места и просим прислать своё фото
+        idx = state["task"]
+        task = TASKS[idx]
+        is_last = (idx == len(TASKS) - 1)
+
+        place_file = task.get("place_image_file")
+        if place_file:
+            place_path = IMAGES_DIR / place_file
+            if place_path.exists():
+                with open(place_path, "rb") as f:
+                    await query.message.reply_photo(
+                        photo=f,
+                        caption="📍 Вот твоя цель — найди это место!"
+                    )
+            else:
+                logger.warning(f"Фото места не найдено: {place_path}")
+                await query.message.reply_text("📍 Фото места пока нет, но ты найдёшь!")
+        else:
+            await query.message.reply_text("📍 Фото места не добавлено, но ты справишься!")
+
+        await query.message.reply_text(
+            "А теперь сделай фото на этом месте и пришли сюда 📸\n"
+            "Или нажми кнопку ниже если уже готова!",
+            reply_markup=kb_photo_prompt(is_last)
+        )
+        state["waiting_photo"] = True
+
+    elif query.data == "no_show_place":
+        # Отказалась от подсказки
+        idx = state["task"]
+        is_last = (idx == len(TASKS) - 1)
+        await query.message.reply_text(
+            "Я знал что ты не ищешь лёгких путей.... удачи в поиске! 💪\n\n"
+            "А теперь сделай фото на этом месте и пришли сюда 📸\n"
+            "Или нажми кнопку ниже если уже готова!",
+            reply_markup=kb_photo_prompt(is_last)
+        )
+        state["waiting_photo"] = True
+
+    elif query.data == "photo_done":
         state["task"] += 1
-        await send_task(update, context, user_id)
+        state["waiting_photo"] = False
+        await send_task(update, context, user_id, from_callback=True)
+
+    elif query.data == "photo_done_finale":
+        state["waiting_photo"] = False
+        await send_finale(update, context, from_callback=True)
 
     elif query.data == "hint":
         idx = state["task"]
-        tasks = TASKS["quests"]
-        if idx >= len(tasks):
+        if idx >= len(TASKS):
             return
-        task = tasks[idx]
+        task = TASKS[idx]
         hints = task.get("hints", [])
         used = state["hints_used"]
-        if used < len(hints):
-            hint_text = f"💡 *Подсказка {used + 1}:*\n\n{hints[used]}"
+        max_hints = len(hints)
+        if used < max_hints:
             state["hints_used"] += 1
-            max_hints = len(hints)
-            kb = get_keyboard(True, state["hints_used"], max_hints)
-            await query.message.reply_text(hint_text, parse_mode="Markdown", reply_markup=kb)
+            hint_text = f"💡 Подсказка {used + 1} из {max_hints}:\n\n{hints[used]}"
+            await query.message.reply_text(
+                hint_text,
+                reply_markup=kb_waiting(state["hints_used"], max_hints)
+            )
         else:
-            await query.message.reply_text("Подсказки закончились! Ты справишься 💪")
+            await query.message.reply_text(
+                "Подсказки закончились! Ты точно справишься 💪",
+                reply_markup=kb_waiting(state["hints_used"], max_hints)
+            )
 
     elif query.data == "enter_answer":
         context.user_data["awaiting_answer"] = True
-        await query.message.reply_text(
-            "✏️ Напиши свой ответ — я проверю!",
-            parse_mode="Markdown"
-        )
+        await query.message.reply_text("✏️ Напиши свой ответ — я проверю!")
 
+
+# ──────────────────────────────────────────────
+#  ОБРАБОТЧИК ФОТО
+# ──────────────────────────────────────────────
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    logger.info(f"Фото получено от user_id={user_id} | state={user_state.get(user_id)}")
+
+    if user_id not in user_state:
+        await update.message.reply_text("Напиши /start чтобы начать квест 🗺")
+        return
+
+    state = user_state[user_id]
+
+    if not state.get("waiting_photo"):
+        await update.message.reply_text(
+            "Красивое фото! Но сейчас мне нужен твой ответ на загадку 😄\n"
+            "Нажми «Ввести ответ» чтобы продолжить."
+        )
+        return
+
+    # Фото принято
+    state["waiting_photo"] = False
+    idx = state["task"]
+    is_last = (idx == len(TASKS) - 1)
+
+    reactions = [
+        "Огонь фото! 🔥",
+        "Красотка! 😍",
+        "Зачёт! 📸✅",
+        "Шикарно! Двигаемся дальше! 🚀",
+        "Вот это кадр! 🌟",
+    ]
+    await update.message.reply_text(random.choice(reactions))
+
+    if is_last:
+        await send_finale(update, context, from_callback=False)
+    else:
+        state["task"] += 1
+        await send_task(update, context, user_id, from_callback=False)
+
+
+# ──────────────────────────────────────────────
+#  ТЕКСТОВЫЕ СООБЩЕНИЯ
+# ──────────────────────────────────────────────
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -151,14 +307,41 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_state[user_id]
 
-    # Check if waiting for answer
+    # Ждём фото — напоминаем
+    if state.get("waiting_photo"):
+        idx = state["task"]
+        is_last = (idx == len(TASKS) - 1)
+        await update.message.reply_text(
+            "📸 Сначала пришли фото с этого места!\nИли нажми кнопку ниже.",
+            reply_markup=kb_photo_prompt(is_last)
+        )
+        return
+
+    # Слово «подсказка»
+    if "подсказка" in text and state.get("waiting_answer"):
+        idx = state["task"]
+        if idx < len(TASKS):
+            task = TASKS[idx]
+            hints = task.get("hints", [])
+            used = state["hints_used"]
+            max_hints = len(hints)
+            if used < max_hints:
+                state["hints_used"] += 1
+                hint_text = f"💡 Подсказка {used + 1} из {max_hints}:\n\n{hints[used]}"
+                await update.message.reply_text(
+                    hint_text,
+                    reply_markup=kb_waiting(state["hints_used"], max_hints)
+                )
+            else:
+                await update.message.reply_text("Подсказки закончились, но ты справишься! 💪")
+        return
+
+    # Проверка ответа
     if context.user_data.get("awaiting_answer") and state.get("waiting_answer"):
         idx = state["task"]
-        tasks = TASKS["quests"]
-        if idx < len(tasks):
-            task = tasks[idx]
+        if idx < len(TASKS):
+            task = TASKS[idx]
             correct_answers = [a.lower().strip() for a in task.get("answers", [])]
-            # Fuzzy: check if any keyword from correct answers is in user text
             matched = any(
                 any(kw in text for kw in ans.split())
                 for ans in correct_answers
@@ -166,31 +349,33 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if matched:
                 context.user_data["awaiting_answer"] = False
                 state["waiting_answer"] = False
+
                 praise = random.choice([
-                    "🎉 Верно! Отлично справилась!",
-                    "✅ Правильно! Ты умница!",
-                    "🌟 Именно! Браво!",
-                    "💫 В точку! Молодец!"
+                    "Верно! Отлично справилась! 🎉",
+                    "Правильно! Ты умница! ✅",
+                    "Именно! Браво! 🌟",
+                    "В точку! Молодец! 💫"
                 ])
-                max_hints = len(task.get("hints", []))
-                kb = get_keyboard(False, 0, max_hints)
+                success = task.get("success_text", "")
+
                 await update.message.reply_text(
-                    f"{praise}\n\n{task.get('correct_text', '')}",
-                    parse_mode="Markdown",
-                    reply_markup=kb
+                    f"{praise}\n\n{success}\n\n"
+                    "Хочешь увидеть место которое тебе нужно найти?",
+                    reply_markup=kb_show_place()
                 )
             else:
+                max_hints = len(task.get("hints", []))
                 await update.message.reply_text(
                     random.choice([
-                        "🤔 Не совсем... Попробуй ещё раз или возьми подсказку!",
-                        "❌ Пока не то. Может подсказка поможет? 💡",
-                        "🔍 Почти! Но нет. Осмотрись внимательнее!"
+                        "Не совсем... Попробуй ещё раз или возьми подсказку! 🤔",
+                        "Пока не то. Может подсказка поможет? 💡",
+                        "Почти! Но нет. Осмотрись внимательнее! 🔍"
                     ]),
-                    reply_markup=get_keyboard(True, state["hints_used"], len(task.get("hints", [])))
+                    reply_markup=kb_waiting(state["hints_used"], max_hints)
                 )
         return
 
-    # FAQ search
+    # FAQ
     best_match = None
     best_score = 0
     for question, answer in FAQ.items():
@@ -201,42 +386,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             best_match = answer
 
     if best_score >= 1 and best_match:
-        await update.message.reply_text(f"🤖 {best_match}", parse_mode="Markdown")
+        await update.message.reply_text(best_match)
     else:
-        await update.message.reply_text(
-            "Не поняла вопрос 🤔 Напиши /help или просто продолжай квест!"
-        )
+        await update.message.reply_text("Не поняла 🤔 Напиши подсказка или /help")
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Команды:*\n"
-        "/start — начать квест заново\n"
-        "/task — повторить текущее задание\n"
-        "/help — эта справка\n\n"
-        "Во время квеста:\n"
-        "• Нажми *«💡 Подсказка»* если застряла\n"
-        "• Нажми *«✏️ Ввести ответ»* чтобы проверить\n"
-        "• Нажми *«➡️ Следующее»* после верного ответа",
-        parse_mode="Markdown"
-    )
-
-
-async def current_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_state or user_state[user_id]["task"] < 0:
-        await update.message.reply_text("Сначала запусти квест командой /start 🗺")
-        return
-    await send_task(update, context, user_id, from_callback=False)
-
+# ──────────────────────────────────────────────
+#  ЗАПУСК
+# ──────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("task", current_task_command))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("task", cmd_task))
     app.add_handler(CallbackQueryHandler(button_handler))
+
+    photo_filter = filters.PHOTO | filters.Document.IMAGE
+    app.add_handler(MessageHandler(photo_filter, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
     logger.info("Квест-бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
